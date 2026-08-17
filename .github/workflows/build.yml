@@ -94,15 +94,7 @@ jobs:
       - name: Convert APK to C header
         run: |
           python3 tools/bin2header.py apk/app-debug.apk firmware/src/embedded_apk.h EMBEDDED_APK
-          # Also create size header
-          APK_SIZE=$(stat -f%z apk/app-debug.apk 2>/dev/null || stat -c%s apk/app-debug.apk)
-          cat > firmware/src/embedded_apk_size.h << EOF
-          // Auto-generated APK size
-          #ifndef EMBEDDED_APK_SIZE_H
-          #define EMBEDDED_APK_SIZE_H
-          const size_t EMBEDDED_APK_SIZE = ${APK_SIZE};
-          #endif // EMBEDDED_APK_SIZE_H
-          EOF
+          APK_SIZE=$(stat -c%s apk/app-debug.apk)
           echo "[build] Embedded APK: ${APK_SIZE} bytes"
 
       - name: Set up Python
