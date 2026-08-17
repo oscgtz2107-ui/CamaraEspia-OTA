@@ -144,6 +144,11 @@ jobs:
       contents: write
       pages: write
     steps:
+      - name: Checkout OTA repo
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
       - name: Download firmware artifacts
         uses: actions/download-artifact@v4
         with:
