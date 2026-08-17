@@ -35,7 +35,6 @@ jobs:
             VERSION=$(grep -oP '#define FIRMWARE_VERSION\s*"\K[^"]+' source/firmware/src/config.h 2>/dev/null || echo "1.0.0")
             echo "version=$VERSION" >> $GITHUB_OUTPUT
           fi
-          echo "sha=${{ github.event.client_payload.sha || github.sha }}" >> $GITHUB_OUTPUT
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -49,15 +48,52 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Build debug APK
+      - name: Generate signing keystore
         working-directory: source/android
-        run: gradle assembleDebug
+        run: |
+          keytool -genkeypair -v \
+            -keystore release.keystore \
+            -alias camaraespia \
+            -keyalg RSA -keysize 2048 \
+            -validity 10000 \
+            -storepass camaraespia2024 \
+            -keypass camaraespia2024 \
+            -dname "CN=CamaraEspia,OU=Dev,O=CamaraEspia,L=Unknown,ST=Unknown,C=MX"
 
-      - name: Upload APK artifact
+      - name: Build release APK
+        working-directory: source/android
+        run: gradle assembleRelease
+        env:
+          KEYSTORE_PASSWORD: camaraespia2024
+          KEY_PASSWORD: camaraespia2024
+
+      - name: Compress APK with gzip
+        working-directory: source/android
+        run: |
+          cp app/build/outputs/apk/release/app-release-unsigned.apk ../apk-release.apk || \
+          cp app/build/outputs/apk/release/app-release.apk ../apk-release.apk || \
+          cp app/build/outputs/apk/debug/app-debug.apk ../apk-release.apk
+          gzip -9 -k ../apk-release.apk
+          ORIGINAL=$(stat -c%s ../apk-release.apk)
+          COMPRESSED=$(stat -c%s ../apk-release.apk.gz)
+          echo "Original: ${ORIGINAL} bytes"
+          echo "Compressed: ${COMPRESSED} bytes"
+          echo "Ratio: $(( COMPRESSED * 100 / ORIGINAL ))%"
+          mkdir -p ${{ github.workspace }}/apk-final
+          cp ../apk-release.apk.gz ${{ github.workspace }}/apk-final/app.apk.gz
+          cp ../apk-release.apk ${{ github.workspace }}/apk-final/app.apk
+
+      - name: Upload original APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: apk
-          path: source/android/app/build/outputs/apk/debug/app-debug.apk
+          name: apk-original
+          path: apk-final/app.apk
+
+      - name: Upload compressed APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-compressed
+          path: apk-final/app.apk.gz
 
   build-firmware:
     needs: build-apk
@@ -85,17 +121,15 @@ jobs:
           fi
           echo "sha=${{ github.event.client_payload.sha || github.sha }}" >> $GITHUB_OUTPUT
 
-      - name: Download APK artifact
+      - name: Download compressed APK
         uses: actions/download-artifact@v4
         with:
-          name: apk
+          name: apk-compressed
           path: apk/
 
-      - name: Convert APK to C header
+      - name: Convert gzipped APK to C header
         run: |
-          python3 tools/bin2header.py apk/app-debug.apk firmware/src/embedded_apk.h EMBEDDED_APK
-          APK_SIZE=$(stat -c%s apk/app-debug.apk)
-          echo "[build] Embedded APK: ${APK_SIZE} bytes"
+          python3 tools/bin2header.py apk/app.apk.gz firmware/src/embedded_apk.h EMBEDDED_APK
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -118,7 +152,6 @@ jobs:
           cp firmware/.pio/build/esp32s3/bootloader.bin release/bootloader.bin
           cp firmware/.pio/build/esp32s3/partitions.bin release/partitions.bin
           
-          # Create combined flash image
           python3 -c "
           with open('release/firmware_flash.bin', 'wb') as out:
               with open('release/bootloader.bin', 'rb') as f: out.write(f.read())
@@ -154,10 +187,10 @@ jobs:
           name: firmware
           path: firmware-release/
 
-      - name: Download APK artifacts
+      - name: Download original APK
         uses: actions/download-artifact@v4
         with:
-          name: apk
+          name: apk-original
           path: apk-release/
 
       - name: Get version
@@ -173,7 +206,7 @@ jobs:
           echo "sha=${{ github.event.client_payload.sha || github.sha }}" >> $GITHUB_OUTPUT
 
       - name: Rename APK
-        run: cp apk-release/app-debug.apk apk-release/CamaraEspia-v${{ steps.version.outputs.version }}.apk
+        run: cp apk-release/app.apk apk-release/CamaraEspia-v${{ steps.version.outputs.version }}.apk
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -185,13 +218,13 @@ jobs:
             
             **Commit:** ${{ steps.version.outputs.sha }}
             
-            ### Firmware
+            ### Firmware (con APK embebido)
             - `CamaraEspia-v${{ steps.version.outputs.version }}.bin` — Firmware para flash directo
             - `firmware_flash.bin` — Imagen completa (bootloader + partitions + firmware)
             - `firmware.sha256` — Hash SHA256 para verificación OTA
             
             ### App Android
-            - `CamaraEspia-v${{ steps.version.outputs.version }}.apk` — App Android
+            - `CamaraEspia-v${{ steps.version.outputs.version }}.apk` — App Android (release, firmada)
           files: |
             firmware-release/CamaraEspia-v${{ steps.version.outputs.version }}.bin
             firmware-release/firmware_flash.bin
