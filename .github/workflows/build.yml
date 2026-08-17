@@ -105,9 +105,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Update version endpoint
+      - name: Deploy version.json to GitHub Pages
         run: |
-          # Save version info as a static file that the ESP32 can fetch
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin gh-pages || true
+          git checkout gh-pages || git checkout --orphan gh-pages
+          git clean -fd
           cat > version.json << EOF
           {
             "version": "${{ steps.version.outputs.version }}",
@@ -117,11 +121,6 @@ jobs:
             "sha256_url": "https://github.com/oscgtz2107-ui/CamaraEspia-OTA/releases/download/v${{ steps.version.outputs.version }}/firmware.sha256"
           }
           EOF
-
-      - name: Deploy version info to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: .
-          include_files: version.json
-          destination_dir: .
+          git add version.json
+          git commit -m "Update version.json to v${{ steps.version.outputs.version }}" || true
+          git push origin gh-pages
