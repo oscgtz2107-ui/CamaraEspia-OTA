@@ -49,7 +49,7 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       - name: Generate signing keystore
-        working-directory: source/android
+        working-directory: source/android/app
         run: |
           keytool -genkeypair -v \
             -keystore release.keystore \
