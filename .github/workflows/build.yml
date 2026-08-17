@@ -1,0 +1,124 @@
+name: Build & Release
+
+on:
+  repository_dispatch:
+    types: [build]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version override (leave empty for auto)'
+        required: false
+        default: ''
+
+jobs:
+  build-firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: oscgtz2107-ui/CamaraEspia
+          ref: main
+          token: ${{ secrets.OTA_TOKEN }}
+
+      - name: Get version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          elif [ -n "${{ github.event.client_payload.version }}" ]; then
+            echo "version=${{ github.event.client_payload.version }}" >> $GITHUB_OUTPUT
+          else
+            VERSION=$(grep -oP '#define FIRMWARE_VERSION\s*"\K[^"]+' firmware/src/config.h 2>/dev/null || echo "1.0.0")
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+          fi
+          echo "sha=${{ github.event.client_payload.sha || github.sha }}" >> $GITHUB_OUTPUT
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install PlatformIO
+        run: |
+          python -m pip install --upgrade pip
+          pip install platformio
+
+      - name: Build firmware
+        working-directory: firmware
+        run: pio run
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p release
+          cp firmware/.pio/build/esp32s3/firmware.bin release/CamaraEspia-v${{ steps.version.outputs.version }}.bin
+          cp firmware/.pio/build/esp32s3/bootloader.bin release/bootloader.bin
+          cp firmware/.pio/build/esp32s3/partitions.bin release/partitions.bin
+          
+          # Create combined flash image
+          python3 -c "
+          import struct
+          with open('release/firmware_flash.bin', 'wb') as out:
+              # bootloader at 0x0
+              with open('release/bootloader.bin', 'rb') as f: out.write(f.read())
+              # pad to 0x8000
+              out.write(b'\x00' * (0x8000 - out.tell()))
+              # partitions at 0x8000
+              with open('release/partitions.bin', 'rb') as f: out.write(f.read())
+              # pad to 0x10000
+              out.write(b'\x00' * (0x10000 - out.tell()))
+              # firmware at 0x10000
+              with open('release/CamaraEspia-v${{ steps.version.outputs.version }}.bin', 'rb') as f: out.write(f.read())
+          "
+          
+          # Generate SHA256 for OTA verification
+          sha256sum release/CamaraEspia-v${{ steps.version.outputs.version }}.bin > release/firmware.sha256
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: CamaraEspia v${{ steps.version.outputs.version }}
+          body: |
+            ## CamaraEspia v${{ steps.version.outputs.version }}
+            
+            **Commit:** ${{ steps.version.outputs.sha }}
+            
+            ### Archivos
+            - `CamaraEspia-v${{ steps.version.outputs.version }}.bin` — Firmware para flash directo
+            - `firmware_flash.bin` — Imagen completa (bootloader + partitions + firmware)
+            - `firmware.sha256` — Hash SHA256 para verificación OTA
+            
+            ### Changelog
+            Ver commits desde la última versión.
+          files: |
+            release/CamaraEspia-v${{ steps.version.outputs.version }}.bin
+            release/firmware_flash.bin
+            release/firmware.sha256
+            release/bootloader.bin
+            release/partitions.bin
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update version endpoint
+        run: |
+          # Save version info as a static file that the ESP32 can fetch
+          cat > version.json << EOF
+          {
+            "version": "${{ steps.version.outputs.version }}",
+            "sha": "${{ steps.version.outputs.sha }}",
+            "date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "download_url": "https://github.com/oscgtz2107-ui/CamaraEspia-OTA/releases/download/v${{ steps.version.outputs.version }}/CamaraEspia-v${{ steps.version.outputs.version }}.bin",
+            "sha256_url": "https://github.com/oscgtz2107-ui/CamaraEspia-OTA/releases/download/v${{ steps.version.outputs.version }}/firmware.sha256"
+          }
+          EOF
+
+      - name: Deploy version info to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: .
+          include_files: version.json
+          destination_dir: .
