@@ -77,6 +77,97 @@ jobs:
           # Generate SHA256 for OTA verification
           sha256sum release/CamaraEspia-v${{ steps.version.outputs.version }}.bin > release/firmware.sha256
 
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: release/
+
+  build-android:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pages: write
+    steps:
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: oscgtz2107-ui/CamaraEspia
+          ref: main
+          token: ${{ secrets.OTA_TOKEN }}
+          path: source
+
+      - name: Get version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          elif [ -n "${{ github.event.client_payload.version }}" ]; then
+            echo "version=${{ github.event.client_payload.version }}" >> $GITHUB_OUTPUT
+          else
+            VERSION=$(grep -oP '#define FIRMWARE_VERSION\s*"\K[^"]+' source/firmware/src/config.h 2>/dev/null || echo "1.0.0")
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build debug APK
+        working-directory: source/android
+        run: |
+          gradle assembleDebug
+
+      - name: Build release APK
+        working-directory: source/android
+        run: |
+          gradle assembleRelease
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: source/android/app/build/outputs/apk/debug/app-debug.apk
+
+  release:
+    needs: [build-firmware, build-android]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pages: write
+    steps:
+      - name: Download firmware artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: firmware
+          path: firmware-release/
+
+      - name: Download APK artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: apk
+          path: apk-release/
+
+      - name: Get version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          elif [ -n "${{ github.event.client_payload.version }}" ]; then
+            echo "version=${{ github.event.client_payload.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=1.0.0" >> $GITHUB_OUTPUT
+          fi
+          echo "sha=${{ github.event.client_payload.sha || github.sha }}" >> $GITHUB_OUTPUT
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -87,19 +178,23 @@ jobs:
             
             **Commit:** ${{ steps.version.outputs.sha }}
             
-            ### Archivos
+            ### Firmware
             - `CamaraEspia-v${{ steps.version.outputs.version }}.bin` — Firmware para flash directo
             - `firmware_flash.bin` — Imagen completa (bootloader + partitions + firmware)
             - `firmware.sha256` — Hash SHA256 para verificación OTA
             
+            ### App Android
+            - `CamaraEspia-v${{ steps.version.outputs.version }}.apk` — App Android
+            
             ### Changelog
             Ver commits desde la última versión.
           files: |
-            release/CamaraEspia-v${{ steps.version.outputs.version }}.bin
-            release/firmware_flash.bin
-            release/firmware.sha256
-            release/bootloader.bin
-            release/partitions.bin
+            firmware-release/CamaraEspia-v${{ steps.version.outputs.version }}.bin
+            firmware-release/firmware_flash.bin
+            firmware-release/firmware.sha256
+            firmware-release/bootloader.bin
+            firmware-release/partitions.bin
+            apk-release/app-debug.apk
           draft: false
           prerelease: false
         env:
@@ -118,7 +213,8 @@ jobs:
             "sha": "${{ steps.version.outputs.sha }}",
             "date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             "download_url": "https://github.com/oscgtz2107-ui/CamaraEspia-OTA/releases/download/v${{ steps.version.outputs.version }}/CamaraEspia-v${{ steps.version.outputs.version }}.bin",
-            "sha256_url": "https://github.com/oscgtz2107-ui/CamaraEspia-OTA/releases/download/v${{ steps.version.outputs.version }}/firmware.sha256"
+            "sha256_url": "https://github.com/oscgtz2107-ui/CamaraEspia-OTA/releases/download/v${{ steps.version.outputs.version }}/firmware.sha256",
+            "apk_url": "https://github.com/oscgtz2107-ui/CamaraEspia-OTA/releases/download/v${{ steps.version.outputs.version }}/app-debug.apk"
           }
           EOF
           git add version.json
