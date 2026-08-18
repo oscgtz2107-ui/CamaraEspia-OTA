@@ -67,36 +67,20 @@ jobs:
           KEYSTORE_PASSWORD: camaraespia2024
           KEY_PASSWORD: camaraespia2024
 
-      - name: Compress APK with gzip
-        working-directory: source/android
+      - name: Collect APK
+        working-directory: source
         run: |
-          cp app/build/outputs/apk/release/app-release-unsigned.apk ../apk-release.apk || \
-          cp app/build/outputs/apk/release/app-release.apk ../apk-release.apk || \
-          cp app/build/outputs/apk/debug/app-debug.apk ../apk-release.apk
-          gzip -9 -k ../apk-release.apk
-          ORIGINAL=$(stat -c%s ../apk-release.apk)
-          COMPRESSED=$(stat -c%s ../apk-release.apk.gz)
-          echo "Original: ${ORIGINAL} bytes"
-          echo "Compressed: ${COMPRESSED} bytes"
-          echo "Ratio: $(( COMPRESSED * 100 / ORIGINAL ))%"
-          mkdir -p ${{ github.workspace }}/apk-final
-          cp ../apk-release.apk.gz ${{ github.workspace }}/apk-final/app.apk.gz
-          cp ../apk-release.apk ${{ github.workspace }}/apk-final/app.apk
+          cp android/app/build/outputs/apk/release/app-release-unsigned.apk CamaraEspia-v${{ steps.version.outputs.version }}.apk || \
+          cp android/app/build/outputs/apk/release/app-release.apk CamaraEspia-v${{ steps.version.outputs.version }}.apk || \
+          cp android/app/build/outputs/apk/debug/app-debug.apk CamaraEspia-v${{ steps.version.outputs.version }}.apk
 
-      - name: Upload original APK artifact
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: apk-original
-          path: apk-final/app.apk
-
-      - name: Upload compressed APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: apk-compressed
-          path: apk-final/app.apk.gz
+          name: apk
+          path: source/CamaraEspia-v${{ steps.version.outputs.version }}.apk
 
   build-firmware:
-    needs: build-apk
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -120,16 +104,6 @@ jobs:
             echo "version=$VERSION" >> $GITHUB_OUTPUT
           fi
           echo "sha=${{ github.event.client_payload.sha || github.sha }}" >> $GITHUB_OUTPUT
-
-      - name: Download compressed APK
-        uses: actions/download-artifact@v4
-        with:
-          name: apk-compressed
-          path: apk/
-
-      - name: Convert gzipped APK to C header
-        run: |
-          python3 tools/bin2header.py apk/app.apk.gz firmware/src/embedded_apk.h EMBEDDED_APK
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -187,10 +161,10 @@ jobs:
           name: firmware
           path: firmware-release/
 
-      - name: Download original APK
+      - name: Download APK
         uses: actions/download-artifact@v4
         with:
-          name: apk-original
+          name: apk
           path: apk-release/
 
       - name: Get version
@@ -205,9 +179,6 @@ jobs:
           fi
           echo "sha=${{ github.event.client_payload.sha || github.sha }}" >> $GITHUB_OUTPUT
 
-      - name: Rename APK
-        run: cp apk-release/app.apk apk-release/CamaraEspia-v${{ steps.version.outputs.version }}.apk
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -218,7 +189,7 @@ jobs:
             
             **Commit:** ${{ steps.version.outputs.sha }}
             
-            ### Firmware (con APK embebido)
+            ### Firmware
             - `CamaraEspia-v${{ steps.version.outputs.version }}.bin` — Firmware para flash directo
             - `firmware_flash.bin` — Imagen completa (bootloader + partitions + firmware)
             - `firmware.sha256` — Hash SHA256 para verificación OTA
