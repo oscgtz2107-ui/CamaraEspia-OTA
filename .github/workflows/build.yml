@@ -1,230 +1,289 @@
 name: Build & Release
 
+# Publica una release completa (firmware + APK) y actualiza version.json, que
+# es lo que consultan tanto las camaras (OTA de firmware) como la app Android.
+#
+# Se dispara solo: el repo privado manda un repository_dispatch en cada push a
+# main que toque firmware/ o android/. Tambien se puede lanzar a mano.
+
 on:
   repository_dispatch:
     types: [build]
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version override (leave empty for auto)'
+        description: 'Version (vacio = leer FIRMWARE_VERSION de config.h)'
         required: false
         default: ''
 
+concurrency:
+  # Dos releases a la vez pelearian por el mismo tag y por la rama gh-pages.
+  group: release
+  cancel-in-progress: false
+
+env:
+  SOURCE_REPO: oscgtz2107-ui/CamaraEspia
+
 jobs:
-  build-apk:
+  # ---------------------------------------------------------------
+  # Version unica para todos los jobs: sin esto cada uno la calculaba
+  # por su cuenta y podian discrepar.
+  # ---------------------------------------------------------------
+  version:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      code: ${{ steps.v.outputs.code }}
+      sha: ${{ steps.v.outputs.sha }}
     steps:
-      - name: Checkout private repo
+      - name: Checkout source (privado)
         uses: actions/checkout@v4
         with:
-          repository: oscgtz2107-ui/CamaraEspia
-          ref: main
-          token: ${{ secrets.OTA_TOKEN }}
-          path: source
-
-      - name: Get version
-        id: version
-        run: |
-          if [ -n "${{ github.event.inputs.version }}" ]; then
-            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
-          elif [ -n "${{ github.event.client_payload.version }}" ]; then
-            echo "version=${{ github.event.client_payload.version }}" >> $GITHUB_OUTPUT
-          else
-            VERSION=$(grep -oP '#define FIRMWARE_VERSION\s*"\K[^"]+' source/firmware/src/config.h 2>/dev/null || echo "1.0.0")
-            echo "version=$VERSION" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Generate signing keystore
-        working-directory: source/android/app
-        run: |
-          keytool -genkeypair -v \
-            -keystore release.keystore \
-            -alias camaraespia \
-            -keyalg RSA -keysize 2048 \
-            -validity 10000 \
-            -storepass camaraespia2024 \
-            -keypass camaraespia2024 \
-            -dname "CN=CamaraEspia,OU=Dev,O=CamaraEspia,L=Unknown,ST=Unknown,C=MX"
-
-      - name: Build release APK
-        working-directory: source/android
-        run: gradle assembleRelease
-        env:
-          KEYSTORE_PASSWORD: camaraespia2024
-          KEY_PASSWORD: camaraespia2024
-
-      - name: Collect APK
-        working-directory: source
-        run: |
-          cp android/app/build/outputs/apk/release/app-release-unsigned.apk CamaraEspia-v${{ steps.version.outputs.version }}.apk || \
-          cp android/app/build/outputs/apk/release/app-release.apk CamaraEspia-v${{ steps.version.outputs.version }}.apk || \
-          cp android/app/build/outputs/apk/debug/app-debug.apk CamaraEspia-v${{ steps.version.outputs.version }}.apk
-
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: apk
-          path: source/CamaraEspia-v${{ steps.version.outputs.version }}.apk
-
-  build-firmware:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout private repo
-        uses: actions/checkout@v4
-        with:
-          repository: oscgtz2107-ui/CamaraEspia
+          repository: ${{ env.SOURCE_REPO }}
           ref: main
           token: ${{ secrets.OTA_TOKEN }}
 
-      - name: Get version
-        id: version
+      - name: Resolver version
+        id: v
         run: |
-          if [ -n "${{ github.event.inputs.version }}" ]; then
-            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
-          elif [ -n "${{ github.event.client_payload.version }}" ]; then
-            echo "version=${{ github.event.client_payload.version }}" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          IN="${{ github.event.inputs.version || github.event.client_payload.version || '' }}"
+          if [ -n "$IN" ]; then
+            VERSION="$IN"
           else
-            VERSION=$(grep -oP '#define FIRMWARE_VERSION\s*"\K[^"]+' firmware/src/config.h 2>/dev/null || echo "1.0.0")
-            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            VERSION=$(grep -oP '#define\s+FIRMWARE_VERSION\s+"\K[^"]+' firmware/src/config.h)
           fi
+          if [ -z "$VERSION" ]; then
+            echo "::error::No se pudo determinar la version desde config.h"; exit 1
+          fi
+          # versionCode debe crecer SIEMPRE o Android rechaza la actualizacion.
+          # Derivarlo de la version (X*10000+Y*100+Z) lo hace monotono y estable.
+          CODE=$(echo "$VERSION" | awk -F. '{printf "%d", ($1*10000)+($2*100)+$3}')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "code=$CODE"       >> $GITHUB_OUTPUT
           echo "sha=${{ github.event.client_payload.sha || github.sha }}" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION (versionCode $CODE)"
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+  # ---------------------------------------------------------------
+  build-firmware:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source (privado)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: main
+          token: ${{ secrets.OTA_TOKEN }}
+
+      - name: Generar secrets.h
+        # secrets.h esta gitignored (no debe versionarse), asi que en CI hay que
+        # recrearlo. Sin este paso el firmware publicado saldria con Telegram
+        # deshabilitado, en silencio.
+        run: |
+          cat > firmware/src/secrets.h << 'EOF'
+          #ifndef SECRETS_H
+          #define SECRETS_H
+          #define TG_BOT_TOKEN   "${{ secrets.TG_BOT_TOKEN }}"
+          #define WIFI_AP_PASS   "${{ secrets.WIFI_AP_PASS }}"
+          #endif
+          EOF
+          if [ -z "${{ secrets.TG_BOT_TOKEN }}" ]; then
+            echo "::warning::TG_BOT_TOKEN vacio: el firmware saldra sin Telegram"
+          fi
+
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.x'
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            firmware/.pio
+          key: pio-${{ hashFiles('firmware/platformio.ini') }}
 
-      - name: Install PlatformIO
-        run: |
-          python -m pip install --upgrade pip
-          pip install platformio
+      - name: Instalar PlatformIO
+        run: pip install --upgrade platformio
 
-      - name: Build firmware
+      - name: Compilar firmware
         working-directory: firmware
         run: pio run
 
-      - name: Collect firmware artifacts
+      - name: Empaquetar artefactos
         run: |
+          set -euo pipefail
+          V="${{ needs.version.outputs.version }}"
+          B=firmware/.pio/build/esp32s3
           mkdir -p release
-          cp firmware/.pio/build/esp32s3/firmware.bin release/CamaraEspia-v${{ steps.version.outputs.version }}.bin
-          cp firmware/.pio/build/esp32s3/bootloader.bin release/bootloader.bin
-          cp firmware/.pio/build/esp32s3/partitions.bin release/partitions.bin
-          
-          python3 -c "
-          with open('release/firmware_flash.bin', 'wb') as out:
-              with open('release/bootloader.bin', 'rb') as f: out.write(f.read())
-              out.write(b'\x00' * (0x8000 - out.tell()))
-              with open('release/partitions.bin', 'rb') as f: out.write(f.read())
-              out.write(b'\x00' * (0x10000 - out.tell()))
-              with open('release/CamaraEspia-v${{ steps.version.outputs.version }}.bin', 'rb') as f: out.write(f.read())
-          "
-          
-          sha256sum release/CamaraEspia-v${{ steps.version.outputs.version }}.bin > release/firmware.sha256
+          cp "$B/firmware.bin"   "release/CamaraEspia-v$V.bin"
+          cp "$B/bootloader.bin" release/bootloader.bin
+          cp "$B/partitions.bin" release/partitions.bin
 
-      - name: Upload firmware artifact
-        uses: actions/upload-artifact@v4
+          # Imagen unica para flasheo de fabrica (bootloader + tabla + app).
+          # Offsets del ESP32-S3: bootloader 0x0, particiones 0x8000, app 0x10000.
+          python3 - << PY
+          import io
+          out = io.BytesIO()
+          def put(path, off):
+              out.write(b'\xff' * (off - out.tell()))
+              out.write(open(path,'rb').read())
+          put('release/bootloader.bin', 0x0000)
+          put('release/partitions.bin', 0x8000)
+          put('release/CamaraEspia-v$V.bin', 0x10000)
+          open('release/firmware_flash.bin','wb').write(out.getvalue())
+          PY
+
+          # Hash del binario OTA (no de la imagen completa).
+          ( cd release && sha256sum "CamaraEspia-v$V.bin" > firmware.sha256 )
+          ls -la release/
+
+      - uses: actions/upload-artifact@v4
         with:
           name: firmware
           path: release/
 
+  # ---------------------------------------------------------------
+  build-apk:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source (privado)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: main
+          token: ${{ secrets.OTA_TOKEN }}
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Restaurar keystore de firma
+        # CRITICO: la clave debe ser SIEMPRE la misma. Si se genera una nueva en
+        # cada build, Android rechaza instalar la actualizacion sobre la version
+        # anterior por firma distinta, y el auto-update queda roto.
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "$KS_B64" ]; then
+            echo "::error::Falta el secret ANDROID_KEYSTORE_BASE64."
+            echo "Genera el keystore UNA vez y guardalo (ver README del repo OTA)."
+            exit 1
+          fi
+          echo "$KS_B64" | base64 -d > android/app/release.keystore
+          echo "Keystore restaurado ($(stat -c%s android/app/release.keystore) bytes)"
+
+      - name: Compilar APK release
+        working-directory: android
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon \
+            -PappVersionName=${{ needs.version.outputs.version }} \
+            -PappVersionCode=${{ needs.version.outputs.code }}
+
+      - name: Recoger APK
+        run: |
+          set -euo pipefail
+          V="${{ needs.version.outputs.version }}"
+          APK=android/app/build/outputs/apk/release/app-release.apk
+          # Sin fallback a debug: publicar un APK de debug como release seria
+          # peor que fallar, porque pasaria desapercibido.
+          if [ ! -f "$APK" ]; then
+            echo "::error::No se genero el APK firmado ($APK)"
+            find android/app/build/outputs/apk -name '*.apk' -print || true
+            exit 1
+          fi
+          mkdir -p apk && cp "$APK" "apk/CamaraEspia-v$V.apk"
+
+          # Comprobar que la version incrustada es la esperada.
+          AAPT=$(find "$ANDROID_HOME/build-tools" -name aapt2 | sort | tail -1)
+          "$AAPT" dump badging "apk/CamaraEspia-v$V.apk" | grep -E "versionName|versionCode" || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: apk/
+
+  # ---------------------------------------------------------------
   release:
-    needs: [build-apk, build-firmware]
+    needs: [version, build-firmware, build-apk]
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      pages: write
     steps:
-      - name: Checkout OTA repo
-        uses: actions/checkout@v4
-        with:
-          ref: main
+      - uses: actions/checkout@v4
 
-      - name: Download firmware artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: firmware
-          path: firmware-release/
+      - uses: actions/download-artifact@v4
+        with: { name: firmware, path: firmware-release/ }
+      - uses: actions/download-artifact@v4
+        with: { name: apk, path: apk-release/ }
 
-      - name: Download APK
-        uses: actions/download-artifact@v4
-        with:
-          name: apk
-          path: apk-release/
-
-      - name: Get version
-        id: version
-        run: |
-          if [ -n "${{ github.event.inputs.version }}" ]; then
-            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
-          elif [ -n "${{ github.event.client_payload.version }}" ]; then
-            echo "version=${{ github.event.client_payload.version }}" >> $GITHUB_OUTPUT
-          else
-            echo "version=1.0.0" >> $GITHUB_OUTPUT
-          fi
-          echo "sha=${{ github.event.client_payload.sha || github.sha }}" >> $GITHUB_OUTPUT
-
-      - name: Create GitHub Release
+      - name: Publicar release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.version.outputs.version }}
-          name: CamaraEspia v${{ steps.version.outputs.version }}
+          tag_name: v${{ needs.version.outputs.version }}
+          name: CamaraEspia v${{ needs.version.outputs.version }}
           body: |
-            ## CamaraEspia v${{ steps.version.outputs.version }}
-            
-            **Commit:** ${{ steps.version.outputs.sha }}
-            
-            ### Firmware
-            - `CamaraEspia-v${{ steps.version.outputs.version }}.bin` — Firmware para flash directo
-            - `firmware_flash.bin` — Imagen completa (bootloader + partitions + firmware)
-            - `firmware.sha256` — Hash SHA256 para verificación OTA
-            
+            ## CamaraEspia v${{ needs.version.outputs.version }}
+
+            **Commit:** `${{ needs.version.outputs.sha }}`
+
+            ### Firmware (ESP32-S3)
+            | Archivo | Uso |
+            |---|---|
+            | `CamaraEspia-v${{ needs.version.outputs.version }}.bin` | Actualizacion OTA |
+            | `firmware_flash.bin` | Flasheo de fabrica a `0x0` (bootloader + tabla + app) |
+            | `firmware.sha256` | Verificacion del binario OTA |
+
             ### App Android
-            - `CamaraEspia-v${{ steps.version.outputs.version }}.apk` — App Android (release, firmada)
+            `CamaraEspia-v${{ needs.version.outputs.version }}.apk` — firmada con la
+            clave de release (actualizable sobre versiones anteriores).
           files: |
-            firmware-release/CamaraEspia-v${{ steps.version.outputs.version }}.bin
+            firmware-release/CamaraEspia-v${{ needs.version.outputs.version }}.bin
             firmware-release/firmware_flash.bin
             firmware-release/firmware.sha256
             firmware-release/bootloader.bin
             firmware-release/partitions.bin
-            apk-release/CamaraEspia-v${{ steps.version.outputs.version }}.apk
+            apk-release/CamaraEspia-v${{ needs.version.outputs.version }}.apk
           draft: false
           prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Deploy version.json to GitHub Pages
+      - name: Publicar version.json en GitHub Pages
+        # Es el unico endpoint que consultan camaras y app; se escribe DESPUES de
+        # la release para que las URLs que anuncia ya existan.
         run: |
-          git config user.name "github-actions[bot]"
+          set -euo pipefail
+          V="${{ needs.version.outputs.version }}"
+          BASE="https://github.com/${{ github.repository }}/releases/download/v$V"
+
+          git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git fetch origin gh-pages || true
-          git checkout gh-pages || git checkout --orphan gh-pages
-          git clean -fd
+          git fetch origin gh-pages && git checkout gh-pages || git checkout --orphan gh-pages
+          git rm -rf --cached . >/dev/null 2>&1 || true
+          git clean -fdx
+
           cat > version.json << EOF
           {
-            "version": "${{ steps.version.outputs.version }}",
-            "sha": "${{ steps.version.outputs.sha }}",
+            "version": "$V",
+            "sha": "${{ needs.version.outputs.sha }}",
             "date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "firmware_url": "https://github.com/oscgtz2107-ui/CamaraEspia-OTA/releases/download/v${{ steps.version.outputs.version }}/CamaraEspia-v${{ steps.version.outputs.version }}.bin",
-            "sha256_url": "https://github.com/oscgtz2107-ui/CamaraEspia-OTA/releases/download/v${{ steps.version.outputs.version }}/firmware.sha256",
-            "apk_url": "https://github.com/oscgtz2107-ui/CamaraEspia-OTA/releases/download/v${{ steps.version.outputs.version }}/CamaraEspia-v${{ steps.version.outputs.version }}.apk"
+            "firmware_url": "$BASE/CamaraEspia-v$V.bin",
+            "sha256_url": "$BASE/firmware.sha256",
+            "apk_url": "$BASE/CamaraEspia-v$V.apk"
           }
           EOF
-          git add version.json
-          git commit -m "Update version.json to v${{ steps.version.outputs.version }}" || true
+          # index.html evita el 404 feo si alguien entra a la raiz de Pages.
+          echo "<!doctype html><meta charset=utf-8><title>CamaraEspia OTA</title><pre>$(cat version.json)</pre>" > index.html
+
+          git add version.json index.html
+          git commit -m "Release v$V" || echo "sin cambios"
           git push origin gh-pages
