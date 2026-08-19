@@ -108,7 +108,11 @@ jobs:
 
       - name: Compilar firmware
         working-directory: firmware
-        run: pio run
+        # -e esp32s3 explicito: sin el, `pio run` compila TODOS los entornos,
+        # incluido el de banco (esp32s3-bench), que lleva un volumen de
+        # pruebas en flash y endpoints sin autenticacion. Nunca debe salir
+        # publicado, y ademas compilarlo duplica el tiempo de build.
+        run: pio run -e esp32s3
 
       - name: Empaquetar artefactos
         run: |
