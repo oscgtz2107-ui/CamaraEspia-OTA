@@ -160,6 +160,12 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
       - uses: android-actions/setup-android@v3
+        with:
+          # Fijar la version que YA trae el runner. Por defecto la action busca
+          # una mas nueva y la descarga de dl.google.com; Google retira esas
+          # URLs sin aviso y el build empieza a fallar con un 404 sin que nada
+          # haya cambiado por nuestra parte.
+          cmdline-tools-version: '12.0'
       - uses: gradle/actions/setup-gradle@v4
 
       - name: Restaurar keystore de firma
