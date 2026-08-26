@@ -1,8 +1,8 @@
 {
-  "version": "1.25.0",
-  "sha": "6357e906defcd51130f734efb273d7f317266a98",
-  "date": "2026-08-26T01:18:32Z",
-  "firmware_url": "https://github.com/oscgtz2107-ui/CamaraEspia-OTA/releases/download/v1.25.0/CamaraEspia-v1.25.0.bin",
-  "sha256_url": "https://github.com/oscgtz2107-ui/CamaraEspia-OTA/releases/download/v1.25.0/firmware.sha256",
-  "apk_url": "https://github.com/oscgtz2107-ui/CamaraEspia-OTA/releases/download/v1.25.0/CamaraEspia-v1.25.0.apk"
+  "version": "1.25.1",
+  "sha": "8b171440644ac53b6d4463f8f56da6f381e4afc3",
+  "date": "2026-08-26T01:25:04Z",
+  "firmware_url": "https://github.com/oscgtz2107-ui/CamaraEspia-OTA/releases/download/v1.25.1/CamaraEspia-v1.25.1.bin",
+  "sha256_url": "https://github.com/oscgtz2107-ui/CamaraEspia-OTA/releases/download/v1.25.1/firmware.sha256",
+  "apk_url": "https://github.com/oscgtz2107-ui/CamaraEspia-OTA/releases/download/v1.25.1/CamaraEspia-v1.25.1.apk"
 }
